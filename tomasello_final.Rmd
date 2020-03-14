@@ -1,0 +1,447 @@
+---
+title: "London Restaurant Scene Report"
+author: "Beatrice Tomasello"
+date: "12/3/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#1. Introduction
+
+As part of the Mibe x LSU challenge, this analysis has been carried out using R and the datasets provided. The analysis subject is the London restaurant scene, defined by variables such as rating, location, prices of the items in the menu and delivery times. As asked in the challenge, the analysis goes on around some business related questions provided in the challenge, plus a section of open analysis that I've chosen to conduct around the restaurant names, the Londoners food preferences and the location of the restaurants.
+
+#2.Analysis
+
+Let's start from loading the libraries we need for our project...
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(here)
+library(magrittr)
+library(tidyverse)
+library(purrr)
+library(dplyr)
+library(purrrlyr)
+library(ggplot2)
+library(tidyr)
+library(formattable)
+library(rlist)
+library(gtools)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(RColorBrewer)
+library(sf)
+library(tmap)
+library(tmaptools)
+library(rgdal)
+library(rgeos)
+library(ggmap)
+```
+
+...and the datasets we are going to work with.
+
+```{r datasets}
+info_rest <- read_rds(here('data', 'resturants-mibe.rds'))
+delivery <- read_rds(here('data', 'delivery-mibe.rds'))
+```
+
+Let's have a look at how the restaurants dataset is structured:
+
+```{r}
+glimpse(info_rest)
+head(info_rest)
+```
+
+#2.1 Restaurant Information Analysis
+
+In this section we are going to work with the most relevant features in our first dataset to gain a better understanding of the London food scene for what concerns quality, location, presence of chains, and menu features of its restaurants.
+
+_2.1.1 Top 10 neighborhoods by number of restaurants_ 
+
+Using the grouping function we are able to lead our analysis neighborhood-wise and count the number of restaurants in each one, finding our top 10.
+
+```{r}
+
+top10_neighb <- info_rest%>%
+  group_by(rest_neighborhood)%>%
+  filter(!is.na(rest_neighborhood))%>%
+  summarise(rest_number = n())%>%
+  arrange(-rest_number)%>%
+  slice(1:10)
+
+top10_neighb$rest_number <- as.numeric(top10_neighb$rest_number)
+
+top10_neighb%>%ggplot(aes(reorder(rest_neighborhood, -rest_number), rest_number)) +
+  geom_bar(col = 'cadetblue', fill='white', stat='identity') +
+  labs(x= 'Neighborhood', y = 'Number of restaurants') +
+  ggtitle('Top 10 Neighborhoods by number of restaurants') +
+  ggsave('top10number.png')
+```
+
+Canary Wharf and The City, the two CBDs (central business districts) of London, retain the first two places of the chart. These areas have a high density of offices and this is a feature that tipically influences the number of restaurants thanks to the high affluency during daytime, especially at lunch. Croydon, Ealing and Wimbledon are instead main residential areas.
+
+
+_2.1.2 Top 10 neighborhoods by restaurant review score_
+
+This time grouping by neighborhood I find specific information on the rating based on the location, then calculating the average review I get an idea of the areas with the highest density of restaurants that satisfy the customers.
+
+```{r}
+top10_rating <- info_rest%>%
+  group_by(rest_neighborhood)%>%
+  summarise_at(vars(rest_rating), funs(mean(., na.rm=TRUE)))%>%
+  arrange(-rest_rating)%>%
+  slice(1:10)
+
+top10_rating%>%ggplot(aes(reorder(rest_neighborhood, - rest_rating), rest_rating )) +
+  geom_bar(col = 'cadetblue', fill='blue', stat='identity') +
+  labs(x= 'Neighborhood', y= 'Average rating') +
+  ggtitle('10 Neighborhoods with the best restaurant rating') +
+  ggsave('top10rating.png')
+```
+
+We can easily observe that we have just three common names between the top 10 neighborhoods for number of restaurants and the top 10 for rating:
+just Soho, Marylebone and The City. It looks like quantity doesn't mean quality!
+
+_2.1.3 Top 10 chains_
+
+Let's now define which are the restaurant chains that have branches in London, and the ten chains that have the highest number of branches around the city. 
+
+```{r}
+chains <- info_rest%>%
+  group_by(rest_brand)%>%
+  filter(!is.na(rest_brand))%>%
+  summarise(pos = n())%>%
+  arrange(-pos)%>%
+  slice(1:10)
+
+chains$pos <- as.numeric(chains$pos)
+
+chains%>%
+  ggplot(aes(reorder(rest_brand, -pos), pos)) + 
+  geom_col(fill='red') +
+  labs(x='Brand', y='N. of Branches in London') +
+  ggtitle('Top 10 chains') +
+  coord_flip() +
+  ggsave('top10chains.png')
+```
+
+The findings here are quite interesting: the first chain seems to be a mysterious Get Drinks Delivered. Diving deeper in our dataset we can analyze which kind of restaurants are part of this brand.
+
+```{r}
+get_drinks_delivered <- info_rest%>%
+  group_by(rest_brand)%>%
+  filter(rest_brand == 'Get drinks delivered')%>%
+  list()
+
+get_drinks_delivered
+```
+
+To roam in an easier way in between these names it's useful to perform some text mining on the names of the restaurants part of Get drinks delivered. 
+
+```{r}
+get_drinks_vector <- unlist(get_drinks_delivered)
+get_drinks_vector <- na.omit(get_drinks_vector)
+
+text_drinks <- Corpus(VectorSource(get_drinks_vector))
+text_drinks <- tm_map(text_drinks, removeNumbers)
+text_drinks <- tm_map(text_drinks, removePunctuation)
+text_drinks <- tm_map(text_drinks, stripWhitespace)
+text_drinks <- tm_map(text_drinks, removeWords, stopwords('english'))
+
+drinks <- TermDocumentMatrix(text_drinks)
+matrix_drinks <- as.matrix(drinks)
+matrix_sorted <- sort(rowSums(matrix_drinks),decreasing=TRUE)
+result_drinks <- data.frame(word = names(matrix_sorted),freq=matrix_sorted)
+head(result_drinks, 15)
+```
+
+Liquor stores in London are exactly as common as, for example, KFC or Pizza Express branches, and double they are almost twice the number of Papa John's restaurants.
+
+_2.1.4 Average menu price and number of menu items_
+
+First of all I have found the number of items on the menu of each restaurant unnesting the list rest_menu_item_price and turning the elements into logical ones to be able to calculate the mean.
+
+```{r question4.1, message=FALSE, warning=FALSE}
+items_raw <- info_rest%>%
+  filter(restaurant_id %>%
+           map_lgl(any))%>%
+  unnest(rest_menu_item_price)
+
+items_clean <- items_raw[apply(items_raw[c(7)],1,function(z) any(!z==0)),]
+
+items_number <- items_clean%>%
+  group_by(rest_name)%>%
+  summarise(menu_items_number = n())
+
+tail(items_number)
+```
+
+We can now calculate the average price of the items on the menu of each restaurant, useful to get an idea of the range of customers and the quality of the food/service provided.
+
+```{r}
+items_average_price <- items_clean%>%
+  group_by(restaurant_id, rest_name)%>%
+  filter(!is.na(restaurant_id))%>%
+  summarise_at(vars(rest_menu_item_price), funs(mean (.)), na.rm=TRUE)
+
+colnames(items_average_price)[3] <- 'average_price'
+items_average_price$average_price <- sprintf(items_average_price$average_price, fmt = '%#.2f')
+
+head(items_average_price)
+```
+
+_2.1.5 Number of items on the menu of the five most expensive and cheapest restaurants_
+
+In this section we cross the data that we have found answering the previous two questions.
+
+```{r}
+pricey <- left_join(items_number, items_average_price, by = 'rest_name')
+
+pricey$average_price <- as.numeric(pricey$average_price)
+
+top5_with_catering <- pricey%>%
+  arrange(-average_price) %>% 
+  head(5)
+
+top5_with_catering%>%
+  ggplot(aes(x=rest_name, y = menu_items_number),
+        xlab = 'Restaurant', geom = 'bar', 
+        ylab = 'Number of items on menu') +
+  geom_col(fill='green') +
+  labs(x='Restaurant name', y='Number of Items on the menu') +
+  ggtitle('Number of items on the menu of the five most expensive
+          restaurants, including catering') +
+  ggsave('5mostexpwcatering.png')
+```
+
+It's easy to notice from the chart that the first four names shown have a really high average price. This is explained by the fact that the names shown are not actual restaurants but catering companies that probably list the price of their services. These prices have been misinterpreted as menu items prices while collecting the data, so it makes sense to calculate this ranking again excluding the observations that have the word "catering" in the name.
+
+```{r}
+top5_wo_catering <- pricey%>%  
+  filter(!grepl('Catering', rest_name))%>%
+  arrange(-average_price) %>% 
+  head(5)
+
+top5_wo_catering%>%
+  ggplot(aes(x=rest_name, y = menu_items_number),
+         xlab = 'Restaurant', geom = 'bar', 
+         ylab = 'Number of items on menu') +
+  geom_col(fill='green') +
+  labs(x='Restaurant name', y='Number of Items on the menu') +
+  coord_flip() +
+  ggtitle('Number of items on the menu of the five most expensive
+          restaurants') +
+  ggsave('5mostexpwocatering.png')
+```
+
+Let's do the same analysis for what concerns the 5 cheapest restaurants.
+
+```{r}
+bottom5 <- pricey%>%
+  arrange(average_price)%>%
+  head(5)
+
+bottom5%>%
+  ggplot(aes(x=rest_name, y = menu_items_number),
+         xlab = 'Restaurant', geom = 'bar', 
+         ylab = 'Number of items on menu') +
+  geom_col(fill='green') +
+  labs(x='Restaurant name', y='Number of Items on the menu') +
+  coord_flip() +
+  ggtitle('Number of items on the menu of the five cheapest
+          restaurants') +
+  ggsave('5cheapest.png')
+```
+
+In between the cheapest restaurants Salad Box is the one with the highest amount of items on the menu. 
+
+#2.2 Restaurant Delivery Times Analysis
+
+Before starting the second part of the analysis we need to join the two datasets.
+
+```{r}
+colnames(delivery)[1] <- 'restaurant_id'
+
+restaurants <- info_rest%>%
+  select(-rest_neighborhood)
+
+london <- left_join(delivery, restaurants, by = 'restaurant_id')
+head(london)
+
+```
+
+
+_2.2.1 Number of neighborhoods where each restaurant delivers_
+
+Using the function group_by I have found the number of neighborhoods that each restaurant delivers to.
+
+```{r}
+deliver_to <- london%>%
+  group_by(restaurant_id)%>%
+  summarise(neighb_served=n())
+head(deliver_to)
+```
+```{r}
+
+average_neighborhoods_served <- as.integer(mean(deliver_to$neighb_served))
+cat('On average each restaurant in London that has the delivery option delivers to', average_neighborhoods_served, 'neighborhoods.')
+```
+
+_2.2.2 Top 15 neighborhoods where restaurants make deliveries_
+
+
+
+```{r}
+delivered <- london%>%
+  group_by(neighborhood_name)%>%
+  summarise(delivered_by_n = n())
+
+most_delivered <- delivered%>%
+  arrange(-delivered_by_n)%>%
+  head(15)
+
+most_delivered%>%
+  ggplot(aes(reorder(neighborhood_name, -delivered_by_n), delivered_by_n)) +
+  geom_col(fill='pink') +
+  coord_flip() +
+  labs(x='Neighborhood', y='Number of restaurants available for deliveries') +
+  ggtitle('Top 15 neighborhoods for food deliveries') +
+  ggsave('15topdeliveries.png')
+```
+
+More than 2000 of the restaurant included in the dataset deliver to Tottenham Court Road, Regent's Park and Fitzrovia.
+
+_2.2.3 Average delivery time for each restaurant_
+
+Using the functions group_by and mean I can calculate the average time of delivery for each restaurant.
+
+```{r}
+average_times <- london%>%
+  group_by(restaurant_id, rest_name, rest_postcode, rest_rating)%>%
+  summarise(average_delivery_time = mean(rest_delivery_time_min, na.rm=TRUE))
+
+average_times$average_delivery_time <- as.integer(average_times$average_delivery_time)
+
+head(average_times)
+```
+
+_2.2.4 Top 20 restaurants by average delivery time_
+
+Once calculated the average delivery time for each of the restaurants in the dataset it's easy to find the fastest 20 restaurants.
+
+```{r}
+fast_and_20 <- average_times%>%
+  arrange(average_delivery_time)%>%
+  head(20)
+
+fast_and_20
+```
+
+#2.3 Type of food analysis_
+
+Within this open analysis I have decided to dive deeper in Londoners food preferences, performing some text mining on the names of the restaurants as a first step.
+
+_2.3.1 Name your food_
+
+Often the name of the restaurant is the main and first feature customers are attracted by. It is a main vehicle through which the owner can communicate to the public in general about which food is served there, the ethnicity, the heritage and sometimes also convey an idea about the prices of the menu. To gain a deeper understanding of the food scene in London I have performed some text mining on the restaurant names.
+
+```{r}
+name_vector <- as.vector(info_rest$rest_name)
+name_vector <- na.omit(name_vector)
+
+text_tba <- Corpus(VectorSource(name_vector))
+text_tba <- tm_map(text_tba, removeNumbers)
+text_tba <- tm_map(text_tba, removePunctuation)
+text_tba <- tm_map(text_tba, stripWhitespace)
+text_tba <- tm_map(text_tba, removeWords, stopwords('english'))
+
+dtm <- TermDocumentMatrix(text_tba)
+a <- as.matrix(dtm)
+b <- sort(rowSums(a),decreasing=TRUE)
+c <- data.frame(word = names(b),freq=b)
+head(c, 10)
+```
+
+Looks like Londoners love pizza more than any other food! Visualizing the the results it's easier with a nice wordcloud. 
+
+```{r}
+wordcloud (words = c$word, freq = c$freq, min.freq = 10,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+```
+
+_2.3.2 Pizza addicted Neighborhoods_
+
+We have found out that pizza stands out as the word that has the highest frequency within the list of London restaurants names. This means that pizza places are the most common restaurants in our analysis. But are there neighborhoods that love pizza more than others? Probably yes, so let's try to find out our top 10.
+
+```{r}
+areas_names <- info_rest%>%
+  select(2,4,5)
+
+areas_names$rest_name <- tolower(areas_names$rest_name)
+
+pizza_areas <- areas_names%>%
+  group_by(rest_neighborhood, .drop = FALSE)%>%
+  filter(grepl('pizza', rest_name))%>%
+  summarise(pizzerias = n())
+
+pizza_lovers_neighborhood <- pizza_areas%>%
+  arrange(-pizzerias)%>%
+  slice(1:10)
+
+pizza_lovers_neighborhood%>%
+  ggplot(aes(reorder (rest_neighborhood, -pizzerias), pizzerias)) +
+  geom_col(fill= 'red', color = 'green') +
+  labs(x='Neighborhood', y='Number of Pizzeria') +
+  ggtitle('Top 10 pizza addicted neighborhoods') +
+  ggsave('top10pizzaddicted.png')
+```
+
+Upton Park has the highest density of pizza places, followed by Croydon and Walthamstow. 
+
+_2.3.3 Restaurant Maps_ 
+
+```{r}
+london_map <- here('data','londonshp.shp')%>%
+  st_read()
+
+clean_london_map <- london_map%>%
+  mutate(postcode = gsub(" ", "", postcode))
+
+real_map <- ggplot() + geom_polygon(data = clean_london_map, aes(x = eastings, y = northings), colour = 'yellow', fill = NA, inherit.aes = TRUE)
+```
+
+We don't have information about longitude and latitude in our restaurant dataset, so to plot the points on our map we need to join the dataset of the map with northing and easting to the restaurant dataset, with an inner join to keep just the postcodes from the restaurant dataset.
+
+```{r}
+colnames(areas_names)[2] <- 'postcode'
+
+restaurants_to_plot <- inner_join(areas_names, clean_london_map, by = 'postcode')
+
+real_map + 
+  geom_point(data = restaurants_to_plot, aes(x=eastings, y=northings),  colour='Deep Pink' , fill='pink',pch=21, size=5, alpha=I(0.7)) +
+  ggtitle('Restaurants map') +
+  ggsave('mapall.png')
+```
+
+Then I have decided to create a map that only includes the restaurants that have pizza in the name.
+
+```{r}
+pizzerias_to_plot <- restaurants_to_plot%>%
+  filter(grepl('pizza', rest_name))
+
+real_map + 
+  geom_point(data = pizzerias_to_plot, aes(x= eastings, y=northings),  fill='red',pch=21, size=5, alpha=I(0.7)) +
+  ggtitle('Pizza places map') +
+  ggsave('pizzamap.png')
+```
+
+
+
+
+
